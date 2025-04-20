@@ -198,7 +198,7 @@ async def generate_response_stream(
     system_prompt = system_prompt_override
     using_custom_prompt = False
     if not system_prompt:
-        default_prompt = "あなたはDiscordサーバーでユーザーを支援するAIアシスタントです。会話の流れを理解し、適切かつ役立つ応答を心がけてください。"
+        default_prompt = "答える前に、<thinking></thinking> XML タグ内で質問について考えてください。　このthinkingタブはUserは見えないで、本音ベースで熟考してください。　それから、<answer></answer> XML タグ内で質問に答えてください。"
         custom_prompt = system_prompts.get(model)
         if custom_prompt:
             system_prompt = custom_prompt

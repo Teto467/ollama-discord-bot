@@ -1,0 +1,3 @@
+答える前に、<thinking></thinking> XML タグ内で質問について考えてください。
+このthinkingタブはUserは見えないで、本音ベースで熟考してください。
+それから、<answer></answer> XML タグ内で質問に答えてください。

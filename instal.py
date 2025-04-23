@@ -7,7 +7,8 @@ def install_libraries():
     libraries = [
         "discord.py",
         "python-dotenv",
-        "aiohttp"
+        "aiohttp",
+        "aiofiles"
     ]
     
     print("ライブラリのインストールを開始します...")

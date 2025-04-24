@@ -72,16 +72,15 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # --- グローバル変数 & 定数 ---
 active_model = DEFAULT_MODEL
+# 各モデルごとのシステムプロンプトを保持 (None はデフォルトプロンプトを使用)
 system_prompts: dict[str, str | None] = defaultdict(lambda: None)
 
 PROMPT_DIR_NAME = "prompts"
-available_prompts: dict[str, str] = {}
-SYSTEM_PROMPT_TXT_CONTENT: str | None = None
+available_prompts: dict[str, str] = {} # prompts ディレクトリ内のカスタムプロンプト
 
 available_ollama_models: list[str] = [] # モデルリストキャッシュ用
 
 PROMPT_NAME_DEFAULT = "[デフォルト]"
-PROMPT_NAME_SYSTEM_TXT = "[System prompt.txt]"
 
 channel_data = defaultdict(lambda: {
     "history": deque(maxlen=HISTORY_LIMIT),
@@ -95,62 +94,24 @@ STREAM_UPDATE_INTERVAL = 1.5
 STREAM_UPDATE_CHARS = 75
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-default_prompt_file_path = os.path.join(script_dir, "System prompt.txt")
 prompts_dir_path = os.path.join(script_dir, PROMPT_DIR_NAME)
 
-DEFAULT_SYSTEM_PROMPT_TEXT = " "
+# Ollama API に渡すデフォルトのシステムプロンプト (空文字列はAPI側のデフォルトを使う意図)
+DEFAULT_SYSTEM_PROMPT_TEXT = "" # もしくは None でも良いかもしれない
 
 # --- ヘルパー関数 ---
 def get_prompt_name_from_content(prompt_content: str | None) -> str:
     """プロンプトの内容から、対応する表示名を返す"""
-    if prompt_content is None:
+    if prompt_content is None or prompt_content == DEFAULT_SYSTEM_PROMPT_TEXT:
         return PROMPT_NAME_DEFAULT
-    if SYSTEM_PROMPT_TXT_CONTENT is not None and prompt_content == SYSTEM_PROMPT_TXT_CONTENT:
-        return PROMPT_NAME_SYSTEM_TXT
     for name, content in available_prompts.items():
         if prompt_content == content:
             return name
-    if prompt_content == DEFAULT_SYSTEM_PROMPT_TEXT:
-        return PROMPT_NAME_DEFAULT
-    return "[カスタム設定]"
+    return "[カスタム設定]" # これは通常、直接文字列で設定された場合などを示す
 
-async def load_system_prompt_from_file(file_path: str = default_prompt_file_path) -> str | None:
-    """指定されたファイルパスからシステムプロンプトを読み込む (非同期)"""
-    global SYSTEM_PROMPT_TXT_CONTENT
-    if not aiofiles:
-        logger.warning("aiofiles がないため、ファイル読み込みをスキップします: %s", os.path.basename(file_path))
-        return None
+# System prompt.txt の読み込み関数は削除
 
-    logger.info(f"システムプロンプトファイル '{os.path.basename(file_path)}' の非同期読み込み試行...")
-    content = None
-    try:
-        async with aiofiles.open(file_path, mode="r", encoding="utf-8") as f:
-            content = await f.read()
-            content = content.strip()
-            if not content:
-                logger.warning(f"システムプロンプトファイル '{os.path.basename(file_path)}' は空です。")
-                content = None
-            else:
-                logger.info(f"システムプロンプトファイル '{os.path.basename(file_path)}' の読み込み成功。")
-    except FileNotFoundError:
-        logger.warning(f"システムプロンプトファイル '{os.path.basename(file_path)}' が見つかりませんでした。")
-        content = None
-    except PermissionError:
-        logger.error(f"システムプロンプトファイル '{os.path.basename(file_path)}' の読み取り権限がありません。")
-        content = None
-    except UnicodeDecodeError:
-        logger.error(f"システムプロンプトファイル '{os.path.basename(file_path)}' の読み込み中にエンコーディングエラー。UTF-8で保存してください。")
-        content = None
-    except Exception as e:
-        logger.error(f"システムプロンプトファイル '{os.path.basename(file_path)}' の読み込み中に予期せぬエラー: {e}", exc_info=True)
-        content = None
-
-    if file_path == default_prompt_file_path:
-        SYSTEM_PROMPT_TXT_CONTENT = content
-
-    return content
-
-def _load_prompts_sync(dir_path: str, current_system_prompt_file_basename: str) -> dict[str, str]:
+def _load_prompts_sync(dir_path: str) -> dict[str, str]:
     """指定されたディレクトリから同期的にプロンプトファイルを読み込む"""
     loaded_prompts = {}
     logger.debug(f"_load_prompts_sync: プロンプトディレクトリ '{dir_path}' の同期読み込みを開始...")
@@ -161,14 +122,15 @@ def _load_prompts_sync(dir_path: str, current_system_prompt_file_basename: str) 
 
     try:
         for filename in os.listdir(dir_path):
-            if filename.lower().endswith(".txt") and filename != current_system_prompt_file_basename:
+            if filename.lower().endswith(".txt"):
                 file_path = os.path.join(dir_path, filename)
                 prompt_name = os.path.splitext(filename)[0]
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
                         content = f.read().strip()
                         if content:
-                            if prompt_name in [PROMPT_NAME_DEFAULT, PROMPT_NAME_SYSTEM_TXT]:
+                            # 予約語のチェックを簡略化
+                            if prompt_name == PROMPT_NAME_DEFAULT:
                                 logger.warning(f"  - _sync: プロンプト名 '{prompt_name}' ({filename}) は予約語のためスキップ。")
                                 continue
                             loaded_prompts[prompt_name] = content
@@ -273,9 +235,10 @@ async def generate_response_stream(
         return None, None, "エラー: 使用するモデルが設定されていません。"
 
     channel_params = channel_data[channel_id]["params"]
-    system_prompt_content = system_prompts.get(current_model) or DEFAULT_SYSTEM_PROMPT_TEXT
+    # system_prompts[current_model] が None の場合は DEFAULT_SYSTEM_PROMPT_TEXT を使用
+    system_prompt_content = system_prompts.get(current_model, None) or DEFAULT_SYSTEM_PROMPT_TEXT
     prompt_name = get_prompt_name_from_content(system_prompts.get(current_model))
-    using_custom = system_prompts.get(current_model) is not None
+    # using_custom = system_prompts.get(current_model) is not None # この変数は使われていない？
 
     data = {
         "model": current_model,
@@ -418,9 +381,10 @@ async def reload_prompts_task():
     global available_prompts
     logger.info("プロンプト定期リロード実行...")
     try:
+        # _load_prompts_sync から不要な引数を削除
         new_prompts = await bot.loop.run_in_executor(
             None,
-            functools.partial(_load_prompts_sync, prompts_dir_path, os.path.basename(default_prompt_file_path))
+            functools.partial(_load_prompts_sync, prompts_dir_path)
         )
         if new_prompts != available_prompts:
             added = list(set(new_prompts.keys()) - set(available_prompts.keys()))
@@ -441,7 +405,8 @@ async def reload_prompts_task():
 async def before_reload_prompts():
     await bot.wait_until_ready()
     logger.info(f"プロンプトリロードタスク準備完了 ({PROMPT_RELOAD_INTERVAL_MINUTES}分ごと)。")
-    # 初回実行は start() 呼び出し後のループに任せる
+    # 初回読み込みは on_ready で行う
+    await reload_prompts_task() # 初回実行
 
 @tasks.loop(minutes=MODEL_UPDATE_INTERVAL_MINUTES)
 async def update_models_task():
@@ -470,8 +435,7 @@ async def on_ready():
     """BOT起動時の処理"""
     logger.info(f'{bot.user} (ID: {bot.user.id}) としてログインしました')
 
-    # System prompt.txt 読み込み
-    await load_system_prompt_from_file(default_prompt_file_path) # ★ ここで呼び出し ★
+    # System prompt.txt の読み込み処理を削除
 
     global active_model
     if not active_model:
@@ -479,14 +443,26 @@ async def on_ready():
         initial_models = await get_available_models()
         if initial_models:
             active_model = initial_models[0]
-            available_ollama_models[:] = initial_models
+            available_ollama_models[:] = initial_models # キャッシュも更新
             logger.info(f"アクティブモデルを '{active_model}' に設定しました。")
         else:
             logger.error("利用可能なOllamaモデルが見つかりませんでした。`/model` コマンドで手動設定が必要です。")
-    elif not available_ollama_models:
+    elif not available_ollama_models: # デフォルトモデルはあるがキャッシュがない場合
          available_ollama_models[:] = await get_available_models()
          logger.info(f"初回モデルリストキャッシュ更新 ({len(available_ollama_models)}個)。")
 
+    # 初回のカスタムプロンプト読み込み
+    global available_prompts
+    try:
+        available_prompts = await bot.loop.run_in_executor(
+            None,
+            functools.partial(_load_prompts_sync, prompts_dir_path)
+        )
+        logger.info(f"初回カスタムプロンプト読み込み完了 ({len(available_prompts)}個): {list(available_prompts.keys())}")
+    except Exception as e:
+        logger.error(f"初回カスタムプロンプト読み込みエラー: {e}", exc_info=True)
+
+    # アクティブモデルのデフォルトプロンプトを None (デフォルト) に設定
     if active_model and active_model not in system_prompts:
          system_prompts[active_model] = None
 
@@ -503,6 +479,7 @@ async def on_ready():
     except Exception as e:
         logger.error(f"スラッシュコマンド同期エラー: {e}")
 
+    # タスクの開始は on_ready 内で行う（before_loop は不要になる場合もあるが、安全のため残す）
     if not reload_prompts_task.is_running():
         reload_prompts_task.start()
     if not update_models_task.is_running():
@@ -546,6 +523,9 @@ async def on_message(message: discord.Message):
     logger.debug(f"チャンネル {channel_id} 履歴追加 (User): {user_message_data['author_name']} - {user_message_data['content'][:50]}...")
 
     reply_message = None
+    final_response_text = None # finally ブロックで参照できるよう初期化
+    metrics = None
+    error_msg = None
     try:
         channel_data[channel_id]["is_generating"] = True
         channel_data[channel_id]["stop_generation_requested"] = False
@@ -564,33 +544,20 @@ async def on_message(message: discord.Message):
 
     except discord.HTTPException as e:
         logger.error(f"チャンネル {channel_id}: メッセージ処理/プレースホルダー送信エラー: {e}")
-        error_embed = Embed(title="エラー", description=f"処理中にエラー発生:\n```\n{e}\n```", color=discord.Color.red())
-        try:
-            if reply_message: await reply_message.edit(embed=error_embed, content=None)
-            else: await message.channel.send(embed=error_embed, reference=message, mention_author=False)
-        except discord.HTTPException: pass
-        # finally は実行される
+        error_msg = f"処理中にDiscord APIエラー発生:\n```\n{e}\n```" # エラーメッセージを finaly で使えるように格納
     except Exception as e:
         logger.error(f"チャンネル {channel_id}: メッセージ処理中予期せぬエラー: {e}", exc_info=True)
-        error_embed = Embed(title="予期せぬエラー", description="処理中に予期せぬエラー発生。", color=discord.Color.red())
-        try:
-            if reply_message: await reply_message.edit(embed=error_embed, content=None)
-            else: await message.channel.send(embed=error_embed, reference=message, mention_author=False)
-        except discord.HTTPException: pass
-        # finally は実行される
+        error_msg = "処理中に予期せぬエラーが発生しました。" # エラーメッセージを finaly で使えるように格納
     finally:
         channel_data[channel_id]["is_generating"] = False
         channel_data[channel_id]["stop_generation_requested"] = False
         logger.debug(f"チャンネル {channel_id}: is_generating フラグを False にリセット。")
 
-    # finally ブロックの外で最終メッセージ編集を行う
-    # try ブロックで return した場合、ここは実行されない
+    # finally ブロックの後で最終メッセージ編集を行う
     if reply_message:
-        # try ブロックで final_response_text などが未定義になる可能性があるので、
-        # エラーが発生した場合は早期リターンするように修正済みのため、ここでは変数が存在すると仮定できる
         try:
             final_embed = reply_message.embeds[0] if reply_message.embeds else Embed()
-            prompt_name = get_prompt_name_from_content(system_prompts.get(current_model))
+            prompt_name = get_prompt_name_from_content(system_prompts.get(current_model)) # ここでも取得
 
             if error_msg:
                 if "ユーザーにより応答生成が停止されました" in error_msg:
@@ -606,11 +573,11 @@ async def on_message(message: discord.Message):
                     final_embed.color = discord.Color.red()
                 final_embed.set_footer(text=f"Model: {current_model} | Prompt: {prompt_name}")
 
-            elif final_response_text:
+            elif final_response_text is not None: # None でないことを確認
                 final_embed.title = None
                 display_final_text = final_response_text
                 if len(display_final_text) > 4000: display_final_text = display_final_text[:4000] + "\n...(文字数上限)"
-                final_embed.description = display_final_text
+                final_embed.description = display_final_text if display_final_text else "(空の応答)" # 空応答の場合も表示
                 final_embed.color = discord.Color.blue()
 
                 footer_text = f"Model: {current_model} | Prompt: {prompt_name}"
@@ -624,6 +591,7 @@ async def on_message(message: discord.Message):
                     if duration > 0: footer_text += f" | {duration:.2f}s"
                 final_embed.set_footer(text=footer_text)
 
+                # 履歴には完全な応答を保存
                 bot_message_data = {
                     "author_name": bot.user.display_name,
                     "author_id": bot.user.id,
@@ -634,6 +602,7 @@ async def on_message(message: discord.Message):
                 channel_data[channel_id]["history"].append(bot_message_data)
                 logger.debug(f"チャンネル {channel_id} 履歴追加 (Bot): {bot_message_data['author_name']} - {bot_message_data['content'][:50]}...")
             else:
+                # generate_response_stream が (None, None, None) を返した場合など
                 final_embed.title = "❓ 無応答"
                 final_embed.description = "応答生成失敗。入力確認またはモデル変更試行要。"
                 final_embed.color = discord.Color.orange()
@@ -672,10 +641,13 @@ async def model_autocomplete(interaction: discord.Interaction, current: str) -> 
 
 async def prompt_autocomplete(interaction: discord.Interaction, current: str) -> list[app_commands.Choice[str]]:
     choices = []
-    special_choices = {PROMPT_NAME_DEFAULT: None, PROMPT_NAME_SYSTEM_TXT: SYSTEM_PROMPT_TXT_CONTENT}
-    for name, content in special_choices.items():
-        if name == PROMPT_NAME_SYSTEM_TXT and content is None: continue
-        if current.lower() in name.lower(): choices.append(app_commands.Choice(name=name, value=name))
+    # デフォルトプロンプトの選択肢を追加
+    if current.lower() in PROMPT_NAME_DEFAULT.lower():
+        choices.append(app_commands.Choice(name=PROMPT_NAME_DEFAULT, value=PROMPT_NAME_DEFAULT))
+
+    # System prompt.txt の選択肢は削除
+
+    # カスタムプロンプトの選択肢を追加
     custom_choices = [
         app_commands.Choice(name=name, value=name)
         for name in sorted(available_prompts.keys()) if current.lower() in name.lower()
@@ -699,7 +671,11 @@ async def stop_generation(interaction: discord.Interaction):
             logger.info(f"チャンネル {channel_id}: ユーザー {interaction.user} (ID: {interaction.user.id}) により停止リクエスト。")
             await interaction.response.send_message("⏹️ 応答の停止を試みています...", ephemeral=True)
             try:
-                await interaction.channel.send(f"⚠️ {interaction.user.mention} が応答生成の停止を試みています。")
+                # チャンネルが存在することを確認してから送信
+                if interaction.channel:
+                    await interaction.channel.send(f"⚠️ {interaction.user.mention} が応答生成の停止を試みています。")
+                else:
+                    logger.warning(f"チャンネル {channel_id}: 停止試行の公開ログ送信失敗 - interaction.channel is None")
             except discord.HTTPException as e:
                  logger.warning(f"チャンネル {channel_id}: 停止試行の公開ログ送信失敗: {e}")
         else:
@@ -711,7 +687,8 @@ async def stop_generation(interaction: discord.Interaction):
 @bot.tree.command(name="model", description="使用するAIモデルとシステムプロンプトを設定します。")
 @app_commands.describe(
     model="利用可能なモデル名を選択してください。",
-    prompt_name=f"適用するシステムプロンプト ('{PROMPT_DIR_NAME}'内のファイル名、{PROMPT_NAME_DEFAULT}、{PROMPT_NAME_SYSTEM_TXT})"
+    # prompt_name の説明文から [System prompt.txt] を削除
+    prompt_name=f"適用するシステムプロンプト ('{PROMPT_DIR_NAME}'内のファイル名、{PROMPT_NAME_DEFAULT})"
 )
 @app_commands.autocomplete(model=model_autocomplete, prompt_name=prompt_autocomplete)
 async def select_model(interaction: discord.Interaction, model: str, prompt_name: str = None):
@@ -721,7 +698,6 @@ async def select_model(interaction: discord.Interaction, model: str, prompt_name
         await interaction.response.send_message("このコマンドは指定されたチャットチャンネルでのみ使用できます。", ephemeral=True)
         return
 
-    # defer() を先に行う
     await interaction.response.defer(ephemeral=True, thinking=False)
 
     if model not in available_ollama_models:
@@ -740,21 +716,26 @@ async def select_model(interaction: discord.Interaction, model: str, prompt_name
     model_changed = previous_model != active_model
 
     prompt_actually_changed = False
-    selected_prompt_name_for_log = None
+    selected_prompt_name_for_log = None # ログ表示用のプロンプト名
     error_occurred = False
     ephemeral_message_lines = []
 
     if prompt_name:
         new_prompt_content: str | None = None
         valid_prompt_selection = False
-        selected_prompt_name_for_log = prompt_name
+        selected_prompt_name_for_log = prompt_name # まず選択された名前を仮代入
 
-        if prompt_name == PROMPT_NAME_DEFAULT: new_prompt_content = None; valid_prompt_selection = True
-        elif prompt_name == PROMPT_NAME_SYSTEM_TXT:
-            if SYSTEM_PROMPT_TXT_CONTENT is not None: new_prompt_content = SYSTEM_PROMPT_TXT_CONTENT; valid_prompt_selection = True
-            else: ephemeral_message_lines.append(f"⚠️ `{os.path.basename(default_prompt_file_path)}` 未検出/空。プロンプト '{prompt_name}' 設定不可。"); error_occurred = True
-        elif prompt_name in available_prompts: new_prompt_content = available_prompts[prompt_name]; valid_prompt_selection = True
-        else: ephemeral_message_lines.append(f"❌ エラー: 不明なプロンプト名 '{prompt_name}'。プロンプト設定スキップ。"); selected_prompt_name_for_log = None; error_occurred = True
+        if prompt_name == PROMPT_NAME_DEFAULT:
+             new_prompt_content = None # デフォルトは None
+             valid_prompt_selection = True
+        # System prompt.txt の分岐は削除
+        elif prompt_name in available_prompts:
+             new_prompt_content = available_prompts[prompt_name]
+             valid_prompt_selection = True
+        else:
+             ephemeral_message_lines.append(f"❌ エラー: 不明なプロンプト名 '{prompt_name}'。プロンプト設定スキップ。")
+             selected_prompt_name_for_log = None # エラーなのでログ用名前をリセット
+             error_occurred = True
 
         if valid_prompt_selection:
             current_prompt_for_new_model = system_prompts.get(active_model)
@@ -763,12 +744,16 @@ async def select_model(interaction: discord.Interaction, model: str, prompt_name
                 logger.info(f"チャンネル {channel_id}: モデル '{active_model}' プロンプト設定 -> '{prompt_name}'")
                 prompt_actually_changed = True
                 ephemeral_message_lines.append(f"📄 システムプロンプトを **{prompt_name}** に設定。")
-            else: ephemeral_message_lines.append(f"ℹ️ モデル **{active_model}** プロンプトは既に **{prompt_name}**。")
+            else:
+                 ephemeral_message_lines.append(f"ℹ️ モデル **{active_model}** プロンプトは既に **{prompt_name}**。")
     else:
-        maintained_prompt_content = system_prompts.get(active_model)
+        # prompt_name が指定されなかった場合、モデル変更時は現在のプロンプト設定を引き継ぐ
+        maintained_prompt_content = system_prompts.get(active_model) # 変更後のモデルのプロンプトを取得
         selected_prompt_name_for_log = get_prompt_name_from_content(maintained_prompt_content)
         ephemeral_message_lines.append(f"ℹ️ システムプロンプト **{selected_prompt_name_for_log}** 維持。")
-        if active_model not in system_prompts: system_prompts[active_model] = None
+        # モデルが初めて使われる場合、デフォルト(None)が設定される
+        if active_model not in system_prompts:
+            system_prompts[active_model] = None
 
     final_ephemeral_message = []
     if model_changed: final_ephemeral_message.append(f"✅ モデル変更 -> **{active_model}**。")
@@ -777,10 +762,14 @@ async def select_model(interaction: discord.Interaction, model: str, prompt_name
 
     await interaction.followup.send("\n".join(final_ephemeral_message), ephemeral=True)
 
+    # 変更があった場合のみ公開ログを送信
     if not error_occurred and (model_changed or prompt_actually_changed):
         log_parts = []
+        # ログ表示用のプロンプト名を確定させる
+        final_prompt_name = get_prompt_name_from_content(system_prompts.get(active_model))
         current_model_display = f"**{active_model}**"
-        current_prompt_display = f"**{selected_prompt_name_for_log}**"
+        current_prompt_display = f"**{final_prompt_name}**"
+
         if model_changed and prompt_actually_changed: log_parts.append(f"モデル: **{previous_model}** → {current_model_display}, プロンプト: **{previous_prompt_name}** → {current_prompt_display}")
         elif model_changed: log_parts.append(f"モデル: **{previous_model}** → {current_model_display} (プロンプト: {current_prompt_display})")
         elif prompt_actually_changed: log_parts.append(f"モデル {current_model_display} プロンプト: **{previous_prompt_name}** → {current_prompt_display}")
@@ -795,7 +784,8 @@ async def select_model(interaction: discord.Interaction, model: str, prompt_name
 
 @bot.tree.command(name="set_prompt", description="現在アクティブなモデルのシステムプロンプトを設定します。")
 @app_commands.describe(
-    prompt_name=f"適用するシステムプロンプト ('{PROMPT_DIR_NAME}'内のファイル名、{PROMPT_NAME_DEFAULT}、{PROMPT_NAME_SYSTEM_TXT})"
+    # prompt_name の説明文から [System prompt.txt] を削除
+    prompt_name=f"適用するシステムプロンプト ('{PROMPT_DIR_NAME}'内のファイル名、{PROMPT_NAME_DEFAULT})"
 )
 @app_commands.autocomplete(prompt_name=prompt_autocomplete)
 async def set_prompt(interaction: discord.Interaction, prompt_name: str):
@@ -815,12 +805,15 @@ async def set_prompt(interaction: discord.Interaction, prompt_name: str):
     valid_prompt = False
     error_message = None
 
-    if prompt_name == PROMPT_NAME_DEFAULT: new_prompt_content = None; valid_prompt = True
-    elif prompt_name == PROMPT_NAME_SYSTEM_TXT:
-        if SYSTEM_PROMPT_TXT_CONTENT is not None: new_prompt_content = SYSTEM_PROMPT_TXT_CONTENT; valid_prompt = True
-        else: error_message = f"⚠️ `{os.path.basename(default_prompt_file_path)}` 未検出/空。設定不可。"
-    elif prompt_name in available_prompts: new_prompt_content = available_prompts[prompt_name]; valid_prompt = True
-    else: error_message = f"❌ エラー: 不明なプロンプト名 '{prompt_name}'。"
+    if prompt_name == PROMPT_NAME_DEFAULT:
+        new_prompt_content = None # デフォルトは None
+        valid_prompt = True
+    # System prompt.txt の分岐は削除
+    elif prompt_name in available_prompts:
+        new_prompt_content = available_prompts[prompt_name]
+        valid_prompt = True
+    else:
+        error_message = f"❌ エラー: 不明なプロンプト名 '{prompt_name}'。"
 
     if error_message:
         await interaction.followup.send(error_message, ephemeral=True)
@@ -856,6 +849,7 @@ async def clear_history(interaction: discord.Interaction):
         logger.info(f"チャンネルID {target_channel_id} 会話履歴/統計クリア完了。")
         await interaction.followup.send("✅ このチャンネルの会話履歴と応答統計をクリアしました。", ephemeral=True)
     else:
+        # channel_data は defaultdict なので、このパスは通常通らないはずだが念のため
         logger.warning(f"クリア対象チャンネルID {target_channel_id} データなし。")
         await interaction.followup.send("ℹ️ クリア対象の会話履歴が見つかりませんでした。", ephemeral=True)
 
@@ -875,7 +869,7 @@ async def show_history(interaction: discord.Interaction, count: app_commands.Ran
         await interaction.followup.send("表示できる会話履歴がありません。", ephemeral=True)
         return
 
-    actual_count = min(count, HISTORY_LIMIT)
+    actual_count = min(count, HISTORY_LIMIT, len(history)) # 履歴数も考慮
     history_list = list(history)
     start_index = max(0, len(history_list) - actual_count)
     display_history = history_list[start_index:]
@@ -887,10 +881,11 @@ async def show_history(interaction: discord.Interaction, count: app_commands.Ran
         author_name_safe = discord.utils.escape_markdown(msg['author_name'])
         author_str = f"{prefix} **{'Assistant' if msg['is_bot'] else author_name_safe}**"
         content_short = (msg['content'][:150] + '...') if len(msg['content']) > 150 else msg['content']
+        # Discordのコードブロック内でエスケープが必要な文字を処理
         content_safe = discord.utils.escape_markdown(content_short).replace('`', '\\`')
         entry_text = f"`{start_index + i + 1}`. {author_str}:\n{content_safe}\n\n"
 
-        if len(history_text) + len(entry_text) > 4000:
+        if len(history_text) + len(entry_text) > 4000: # Embed Description の制限
              history_text += "... (表示数上限のため省略)"
              break
         history_text += entry_text
@@ -923,28 +918,56 @@ async def set_parameter(interaction: discord.Interaction, parameter: app_command
         original_value = current_params.get(param_name)
         new_value = None
 
+        # 値の検証と変換
         if param_name == "temperature":
-            float_value = float(value); new_value = float_value if 0.0 <= float_value <= 2.0 else (_ for _ in ()).throw(ValueError("Temperature は 0.0 ～ 2.0"))
+            try:
+                float_value = float(value)
+                if 0.0 <= float_value <= 2.0:
+                    new_value = float_value
+                else:
+                    raise ValueError("Temperature は 0.0 から 2.0 の範囲で指定してください。")
+            except ValueError:
+                raise ValueError("Temperature には数値を入力してください。")
         elif param_name == "top_k":
-            int_value = int(value); new_value = int_value if int_value >= 0 else (_ for _ in ()).throw(ValueError("Top K は 0 以上"))
+            try:
+                int_value = int(value)
+                if int_value >= 0:
+                    new_value = int_value
+                else:
+                    raise ValueError("Top K は 0 以上の整数で指定してください。")
+            except ValueError:
+                 raise ValueError("Top K には整数を入力してください。")
         elif param_name == "top_p":
-            float_value = float(value); new_value = float_value if 0.0 <= float_value <= 1.0 else (_ for _ in ()).throw(ValueError("Top P は 0.0 ～ 1.0"))
+            try:
+                float_value = float(value)
+                if 0.0 <= float_value <= 1.0:
+                     new_value = float_value
+                else:
+                    raise ValueError("Top P は 0.0 から 1.0 の範囲で指定してください。")
+            except ValueError:
+                raise ValueError("Top P には数値を入力してください。")
 
         if new_value is not None:
+            # 値が実際に変更されたかチェック (浮動小数点数の比較も考慮)
             is_changed = not (isinstance(original_value, (int, float)) and isinstance(new_value, (int, float)) and math.isclose(original_value, new_value, rel_tol=1e-9)) and original_value != new_value
+
             if is_changed:
                  current_params[param_name] = new_value
                  logger.info(f"チャンネル {target_channel_id}: パラメータ '{param_name}' 設定 -> '{new_value}'")
                  response_message = f"✅ パラメータ **{param_name}** 設定 -> **{new_value}**。"
-            else: response_message = f"ℹ️ パラメータ **{param_name}** は既に **{new_value}**。"
-        else: raise ValueError("内部エラー: 値処理失敗。")
+            else:
+                # 値は正しいが変更がない場合
+                 response_message = f"ℹ️ パラメータ **{param_name}** は既に **{new_value}**。"
+        else:
+             # このパスには通常到達しないはず
+             raise ValueError("内部エラー: 値の処理に失敗しました。")
 
     except ValueError as e:
         logger.warning(f"チャンネル {target_channel_id}: パラメータ設定エラー ({param_name}={value}): {e}")
         response_message = f"⚠️ 設定値エラー: {e}"
     except Exception as e:
         logger.error(f"チャンネル {target_channel_id}: パラメータ設定中エラー: {e}", exc_info=True)
-        response_message = "❌ パラメータ設定中エラー発生。"
+        response_message = "❌ パラメータ設定中に予期せぬエラーが発生しました。"
 
     await interaction.followup.send(response_message, ephemeral=True)
 
@@ -960,7 +983,7 @@ async def show_stats(interaction: discord.Interaction):
 
     stats_deque = channel_data[target_channel_id]["stats"]
     total_count = len(stats_deque)
-    stats_max_len = channel_data[target_channel_id]["stats"].maxlen or 50
+    stats_max_len = channel_data[target_channel_id]["stats"].maxlen or 50 # maxlen が設定されていない場合を考慮
 
     embed = Embed(title="📊 BOTステータス & 応答統計", color=discord.Color.green())
 
@@ -982,16 +1005,20 @@ async def show_stats(interaction: discord.Interaction):
     else:
         total_duration, total_tokens, total_tps, valid_tps_count = 0.0, 0, 0.0, 0
         for stat in stats_deque:
+            # get のデフォルト値を 0.0 や 0 にして None の可能性を排除
             duration = stat.get("total_duration", 0.0)
             tokens = stat.get("total_tokens", 0)
             tps = stat.get("tokens_per_second", 0.0)
-            if duration > 0 and duration < 600: total_duration += duration
+            # 極端な値を除外（タイムアウトや低すぎる値など）
+            if duration > 0.01 and duration < 600: total_duration += duration
             if tokens > 0: total_tokens += tokens
-            if tps > 0 and tps < 10000: total_tps += tps; valid_tps_count += 1
+            # 極端なTPS値を除外
+            if tps > 0.01 and tps < 10000: total_tps += tps; valid_tps_count += 1
 
-        avg_duration = total_duration / total_count if total_count > 0 else 0
-        avg_tokens = total_tokens / total_count if total_count > 0 else 0
-        avg_tps = total_tps / valid_tps_count if valid_tps_count > 0 else 0
+        # ゼロ除算を防ぐ
+        avg_duration = total_duration / total_count if total_count > 0 else 0.0
+        avg_tokens = total_tokens / total_count if total_count > 0 else 0.0
+        avg_tps = total_tps / valid_tps_count if valid_tps_count > 0 else 0.0
 
         stats_summary = (
             f"平均応答時間: **{avg_duration:.2f} 秒**\n"
@@ -1014,14 +1041,14 @@ if __name__ == "__main__":
     logger.info(f"デフォルトモデル: {DEFAULT_MODEL or '未設定'}")
     logger.info(f"履歴保持数: {HISTORY_LIMIT}")
     logger.info(f"Ollama API URL: {OLLAMA_API_URL}")
-    logger.info(f"システムプロンプトパス: {default_prompt_file_path}")
+    # System prompt.txt パスのログを削除
     logger.info(f"カスタムプロンプトDir: {prompts_dir_path}")
     logger.info(f"プロンプトリロード間隔: {PROMPT_RELOAD_INTERVAL_MINUTES} 分")
     logger.info(f"モデルリスト更新間隔: {MODEL_UPDATE_INTERVAL_MINUTES} 分")
     logger.info("-------------------------------------------")
 
     try:
-        bot.run(TOKEN, log_handler=None)
+        bot.run(TOKEN, log_handler=None) # 標準のロギングハンドラを使うので None
     except discord.LoginFailure: logger.critical("Discordログイン失敗。トークン確認要。")
     except discord.PrivilegedIntentsRequired: logger.critical("Message Content Intent 無効。Developer Portal確認要。")
     except ImportError as e: logger.critical(f"ライブラリ不足: {e}")

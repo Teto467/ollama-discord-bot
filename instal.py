@@ -8,9 +8,11 @@ def install_libraries():
         "discord.py",
         "python-dotenv",
         "aiohttp",
-        "aiofiles"
+        "aiofiles",
+        "google-generativeai",
+        "Pillow" # Gemini APIライブラリを追加
     ]
-    
+
     print("ライブラリのインストールを開始します...")
     
     # 各ライブラリをインストール
@@ -36,15 +38,16 @@ def install_libraries():
             subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "discord.py[voice]"])
         print("音声サポートのインストールが完了しました。")
     except subprocess.CalledProcessError:
-        print("音声サポートのインストールに失敗しました。")
+        print("音声サポートのインストールに失敗しました。") # 失敗しても処理は続行
     
     # aiohttpの高速化オプション（推奨）
     try:
-        print("aiohttpの高速化オプションをインストール中...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "aiodns"])
+        print("aiohttpの高速化オプション (aiodns, Brotli, cchardet) をインストール中...")
+        # cchardet と brotli も追加
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-U", "aiodns", "Brotli", "cchardet"])
         print("高速化オプションのインストールが完了しました。")
     except subprocess.CalledProcessError:
-        print("高速化オプションのインストールに失敗しました。")
+        print("高速化オプションのインストールに失敗しました。") # 失敗しても処理は続行
     
     print("すべてのライブラリのインストールが完了しました。")
     return True
